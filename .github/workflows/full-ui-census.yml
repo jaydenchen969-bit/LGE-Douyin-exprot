@@ -1,0 +1,126 @@
+name: Full UI Source Census
+on:
+  push:
+    paths:
+      - '.github/workflows/full-ui-census.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xiaobang-offline-source-and-probe
+          run-id: 35361530318
+          github-token: ${{ github.token }}
+          path: baseline
+      - name: Resolve only static chunk URLs declared by archived webpack runtime
+        shell: bash
+        run: |
+          mkdir -p out/documents out/assets out/tooling
+          node <<'JS'
+          const fs=require('fs'),vm=require('vm');
+          const s=fs.readFileSync('baseline/assets/075.js','utf8');
+          const begin=s.lastIndexOf('var g=f.O(void 0,');
+          const end=s.indexOf('return g=f.O(g)',begin)+'return g=f.O(g)'.length;
+          if(begin<0||end<begin)throw new Error('Archived runtime signature changed');
+          const patched=s.slice(0,begin)+'self.__xb_require=f;return {__xb_require:f}'+s.slice(end);
+          const sandbox={};sandbox.self=sandbox;sandbox.window=sandbox;
+          vm.runInNewContext(patched,sandbox,{timeout:5000});
+          const req=sandbox.__xb_require;
+          const ids=[...new Set([...s.matchAll(/\b[a-zA-Z_$][\w$]*\.e\((\d+)\)/g)].map(x=>Number(x[1])))];
+          const urls=ids.flatMap(id=>[{id,kind:'js',url:req.p+req.u(id)},{id,kind:'css',url:req.p+req.miniCssF(id)}]).filter(x=>!x.url.includes('undefined'));
+          fs.writeFileSync('out/crm-declared-chunks.json',JSON.stringify(urls,null,2));
+          console.log('Static chunk declarations',urls.length);
+          JS
+      - name: Archive public UI sources in parallel, without login or business requests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures,hashlib,json,pathlib,urllib.request,urllib.error,urllib.parse,re
+          from html.parser import HTMLParser
+          root=pathlib.Path('out')
+          apps=json.loads(pathlib.Path('baseline/micro-apps.json').read_text())
+          allowed={'lf-cdn-tos.bytescm.com','lf3-cdn-tos.bytescm.com','lf6-cdn2-tos.bytegoofy.com','lf-static-dr.bytegoofy.com'}
+          def accepted(url):
+              p=urllib.parse.urlsplit(url)
+              return p.scheme=='https' and p.hostname in allowed and not re.search(r'/(api|passport|oauth)/',p.path)
+          class Links(HTMLParser):
+              def __init__(self):super().__init__();self.urls=[]
+              def handle_starttag(self,tag,attrs):
+                  a=dict(attrs)
+                  if tag=='script' and a.get('src'):self.urls.append(a['src'])
+                  if tag=='link' and a.get('href') and (a.get('rel')=='stylesheet' or a.get('as') in ('script','style')):self.urls.append(a['href'])
+          def get(url,dest):
+              result={'requested_url':url,'local_file':str(dest),'authenticated':False}
+              if not accepted(url):result['error']='not in explicit static-host allowlist';return result,None
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=25) as response:
+                      if not accepted(response.url):raise ValueError('redirect outside static-host allowlist')
+                      data=response.read(30000001)
+                      if len(data)>30000000:raise ValueError('exceeds 30 MB per-static-file cap')
+                      dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+                      result.update(status=response.status,final_url=response.url,bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),content_type=response.headers.get('Content-Type',''))
+                      return result,data
+              except Exception as exc:result['error']=str(exc)
+              return result,None
+          def doc(app):
+              url='https:'+app['source_url'] if app['source_url'].startswith('//') else app['source_url']
+              r,data=get(url,root/'documents'/(app['name']+'.html'))
+              if data is None and app.get('source_url_backup'):
+                  backup='https:'+app['source_url_backup'] if app['source_url_backup'].startswith('//') else app['source_url_backup']
+                  r,data=get(backup,root/'documents'/(app['name']+'.html'))
+                  r['primary_failure']=url
+              r.update(app_name=app['name'],declared_version=app['version']);links=[]
+              if data:
+                  p=Links();p.feed(data.decode('utf8','replace'))
+                  links=[urllib.parse.urljoin(r.get('final_url',url),x) for x in p.urls]
+              return r,[x for x in links if accepted(x) and urllib.parse.urlsplit(x).path.endswith(('.js','.css'))]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:docs=list(pool.map(doc,apps))
+          candidates={}
+          for d,urls in docs:
+              for u in urls:candidates.setdefault(u,set()).add(d['app_name'])
+          for row in json.loads((root/'crm-declared-chunks.json').read_text()):
+              if accepted(row['url']):candidates.setdefault(row['url'],set()).add('crm')
+          known={}
+          base=json.loads(pathlib.Path('baseline/manifest.json').read_text())
+          lazy=json.loads(pathlib.Path('baseline/lazy-manifest.json').read_text())
+          for r in base['assets']+lazy:
+              if r.get('status')==200:known[r['requested_url']]=r
+          entries=sorted(candidates.items())
+          def asset(entry):
+              url,owners=entry
+              # A manifest reference to the immutable baseline avoids duplicate files.
+              if url in known:
+                  r=dict(known[url]);r.update(reused_baseline=True,app_names=sorted(owners));return r
+              ext=pathlib.Path(urllib.parse.urlsplit(url).path).suffix
+              dest=root/'assets'/(hashlib.sha256(url.encode()).hexdigest()[:20]+ext)
+              r,_=get(url,dest);r.update(app_names=sorted(owners));return r
+          with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:assets=list(pool.map(asset,entries))
+          report={'mode':'parallel_static_source_census','llm_subagents_launched':0,'apps':apps,'documents':[x[0] for x in docs],'assets':assets,'business_requests_sent':0,'font_files_fetched':0,'source_missing':[a for a in assets if a.get('status')!=200]}
+          (root/'manifest.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print('Documents',sum(d[0].get('status')==200 for d in docs),'/',len(docs))
+          print('Assets',sum(a.get('status')==200 for a in assets),'/',len(assets))
+          print('New asset bytes',sum(a.get('bytes',0) for a in assets if not a.get('reused_baseline')))
+          PY
+      - name: Save parser for offline route evidence extraction
+        shell: bash
+        run: |
+          npm install --prefix /tmp/ui-parser --no-audit --no-fund --ignore-scripts acorn@8 acorn-walk@8
+          cp /tmp/ui-parser/node_modules/acorn/dist/acorn.js out/tooling/acorn.cjs
+          cp /tmp/ui-parser/node_modules/acorn-walk/dist/walk.js out/tooling/acorn-walk.cjs
+          cp /tmp/ui-parser/node_modules/acorn/LICENSE out/tooling/acorn-LICENSE
+          cp /tmp/ui-parser/node_modules/acorn-walk/LICENSE out/tooling/acorn-walk-LICENSE
+          npm list --prefix /tmp/ui-parser --json > out/tooling/parser-versions.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xiaobang-full-ui-census
+          path: out
+          retention-days: 7
+          if-no-files-found: error
