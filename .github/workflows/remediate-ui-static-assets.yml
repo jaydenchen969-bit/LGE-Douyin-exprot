@@ -1,0 +1,45 @@
+name: Repair UI Static Asset Gaps
+on:
+  push:
+    paths: ['.github/workflows/remediate-ui-static-assets.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Download only exact publicly declared UI assets
+        shell: bash
+        run: |
+          mkdir -p out/assets
+          python3 - <<'PY'
+          import concurrent.futures, hashlib, json, pathlib, urllib.request, urllib.parse
+          groups={
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/image/': ['qualification-example.0ef57855.jpg','indoor.acf9c624.png','outdoor.30654b91.png'],
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/message/cn/': ['506.40c84825.js','async/819.ed8df13e.js','async/982.14716903.js','async/222.5d0f98c8.js','chunk/377.c55fb99a.js','chunk/410.6d526efc.js','chunk/459.5ce44e95.js','chunk/488.520be543.js','chunk/686.e4cd1256.js','chunk/822.3c947409.js','async/222.7b90777b.css','async/819.e2feffdf.css','async/982.8de715ff.css']
+          }
+          urls=[base+name for base,names in groups.items() for name in names]
+          def one(url):
+              name=hashlib.sha256(url.encode()).hexdigest()[:20]+pathlib.Path(urllib.parse.urlsplit(url).path).suffix
+              path=pathlib.Path('out/assets')/name
+              result={'requested_url':url,'path':str(path.relative_to('out')),'authenticated':False,'owners':['message'] if '/message/' in url else ['crm']}
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'}),timeout=20) as response:
+                      data=response.read(12000001)
+                      if len(data)>12000000:raise ValueError('oversize')
+                      path.write_bytes(data)
+                      result.update(status=response.status,bytes=len(data),content_type=response.headers.get('Content-Type',''),source_sha256=hashlib.sha256(data).hexdigest())
+              except Exception as error:result['error']=str(error)
+              return result
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(one,urls))
+          pathlib.Path('out/manifest.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
+          print(json.dumps({'requested':len(results),'archived':sum(x.get('status')==200 for x in results),'business_requests':0}))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-remediation-assets
+          path: out
+          retention-days: 7
+          if-no-files-found: error
