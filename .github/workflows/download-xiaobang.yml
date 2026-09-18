@@ -1,4 +1,4 @@
-name: Download Xiaobang APK
+name: Decode Xiaobang APK
 
 on:
   push:
@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  download:
+  decode:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Download APK from mirrors
         shell: bash
@@ -35,24 +35,50 @@ jobs:
               fi
             fi
           done
-          if [ "$ok" -ne 1 ]; then
-            echo "No mirror produced a valid APK"
-            exit 1
-          fi
+          test "$ok" -eq 1
           md5sum douyin_xiaobang.apk | tee md5.txt
-          sha256sum douyin_xiaobang.apk | tee sha256.txt
-          file douyin_xiaobang.apk | tee file-info.txt
-          unzip -l douyin_xiaobang.apk | head -n 200 > apk-list-head.txt
 
-      - name: Upload APK artifact
+      - name: Install apktool
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y apktool
+
+      - name: Decode APK resources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          apktool d -f douyin_xiaobang.apk -o decoded
+          mkdir -p package selected_assets
+          cp decoded/AndroidManifest.xml package/
+          cp decoded/apktool.yml package/
+          cp md5.txt package/
+          cp -R decoded/res package/res
+
+          while IFS= read -r -d '' f; do
+            rel="${f#decoded/}"
+            mkdir -p "selected_assets/$(dirname "$rel")"
+            cp "$f" "selected_assets/$rel"
+          done < <(find decoded/res -type f \( -name 'ls_*' -o -name 'lsm_*' -o -name 'enterprise_*' \) -print0)
+
+          {
+            echo '=== Manifest app package ==='
+            grep -nE 'package=|versionName|versionCode|application|activity|service' decoded/AndroidManifest.xml | head -n 400 || true
+            echo
+            echo '=== App-specific resource refs ==='
+            grep -RniE 'ls_customer|ls_data|ls_home|ls_message|ls_new_open|ls_order|activity_homepage|share_name_card|SplashActivity|lifeservice.crm' decoded/res decoded/AndroidManifest.xml | head -n 1200 || true
+            echo
+            echo '=== Main layouts ==='
+            find decoded/res -type f -path '*/layout*/*' | sed 's#decoded/##' | sort
+          } > package/ui-analysis.txt
+
+          tar -czf xiaobang-decoded-resources.tar.gz package selected_assets
+
+      - name: Upload decoded resources
         uses: actions/upload-artifact@v4
         with:
-          name: douyin-xiaobang-apk
-          path: |
-            douyin_xiaobang.apk
-            md5.txt
-            sha256.txt
-            file-info.txt
-            apk-list-head.txt
+          name: xiaobang-decoded-resources
+          path: xiaobang-decoded-resources.tar.gz
           if-no-files-found: error
           retention-days: 1
