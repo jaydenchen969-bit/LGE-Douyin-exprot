@@ -1,4 +1,4 @@
-name: Decode Xiaobang APK
+name: Extract Xiaobang App Code
 
 on:
   push:
@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  decode:
+  extract:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Download APK from mirrors
+      - name: Download APK
         shell: bash
         run: |
           set -euxo pipefail
@@ -22,63 +22,58 @@ jobs:
           )
           ok=0
           for url in "${urls[@]}"; do
-            echo "Trying $url"
-            rm -f douyin_xiaobang.apk
-            if curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 \
-              -A "Mozilla/5.0" \
-              -o douyin_xiaobang.apk "$url"; then
-              size=$(stat -c%s douyin_xiaobang.apk)
-              echo "Downloaded $size bytes"
-              if [ "$size" -gt 1000000 ] && unzip -t douyin_xiaobang.apk >/dev/null 2>&1; then
+            rm -f app.apk
+            if curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 -A "Mozilla/5.0" -o app.apk "$url"; then
+              if [ "$(stat -c%s app.apk)" -gt 1000000 ] && unzip -t app.apk >/dev/null 2>&1; then
                 ok=1
                 break
               fi
             fi
           done
           test "$ok" -eq 1
-          md5sum douyin_xiaobang.apk | tee md5.txt
 
-      - name: Install apktool
+      - name: Decode with apktool
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y apktool
+          apktool d -f app.apk -o decoded
 
-      - name: Decode APK resources
+      - name: Extract app-specific code and route evidence
         shell: bash
         run: |
           set -euxo pipefail
-          apktool d -f douyin_xiaobang.apk -o decoded
-          mkdir -p package selected_assets
-          cp decoded/AndroidManifest.xml package/
-          cp decoded/apktool.yml package/
-          cp md5.txt package/
-          cp -R decoded/res package/res
+          mkdir -p out/app-smali out/evidence
+          shopt -s nullglob
+          for root in decoded/smali decoded/smali_classes*; do
+            src="$root/com/bytedance/lifeservice/crm"
+            if [ -d "$src" ]; then
+              dst="out/app-smali/$(basename "$root")"
+              mkdir -p "$dst"
+              cp -R "$src" "$dst/"
+            fi
+          done
 
-          while IFS= read -r -d '' f; do
-            rel="${f#decoded/}"
-            mkdir -p "selected_assets/$(dirname "$rel")"
-            cp "$f" "selected_assets/$rel"
-          done < <(find decoded/res -type f \( -name 'ls_*' -o -name 'lsm_*' -o -name 'enterprise_*' \) -print0)
+          grep -RniE --include='*.smali' \
+            'TabBarModuleWidget|MainPageActivity|MainActivity|ls_selector_(home|customer|data|message|new_open|order|me)|openMyPage|tab_bar|schema|lynx|bullet|客户|首页|数据|消息|开店|订单|我的|拜访|业绩' \
+            out/app-smali > out/evidence/app-code-hits.txt || true
 
+          find out/app-smali -type f -name '*.smali' | sort > out/evidence/file-list.txt
           {
-            echo '=== Manifest app package ==='
-            grep -nE 'package=|versionName|versionCode|application|activity|service' decoded/AndroidManifest.xml | head -n 400 || true
+            echo '=== likely tab-bar files ==='
+            find out/app-smali -type f -path '*tab_bar*' -name '*.smali' -print
             echo
-            echo '=== App-specific resource refs ==='
-            grep -RniE 'ls_customer|ls_data|ls_home|ls_message|ls_new_open|ls_order|activity_homepage|share_name_card|SplashActivity|lifeservice.crm' decoded/res decoded/AndroidManifest.xml | head -n 1200 || true
-            echo
-            echo '=== Main layouts ==='
-            find decoded/res -type f -path '*/layout*/*' | sed 's#decoded/##' | sort
-          } > package/ui-analysis.txt
+            echo '=== main activity files ==='
+            find out/app-smali -type f \( -name 'MainActivity*.smali' -o -name 'MainPageActivity*.smali' \) -print
+          } > out/evidence/key-files.txt
 
-          tar -czf xiaobang-decoded-resources.tar.gz package selected_assets
+          tar -czf xiaobang-app-code.tar.gz out
 
-      - name: Upload decoded resources
+      - name: Upload app code
         uses: actions/upload-artifact@v4
         with:
-          name: xiaobang-decoded-resources
-          path: xiaobang-decoded-resources.tar.gz
+          name: xiaobang-app-code
+          path: xiaobang-app-code.tar.gz
           if-no-files-found: error
           retention-days: 1
