@@ -1,0 +1,40 @@
+name: Fetch Xiaobang Reference Screens
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-xiaobang-screens.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch source screenshots
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p screens
+          urls=(
+            "https://pic.y8l.com/up/2026-4/20264818450320320.jpg"
+            "https://pic.y8l.com/up/2026-4/20264818447552640.jpg"
+            "https://pic.y8l.com/up/2026-4/20264818448097190.jpg"
+            "https://pic.y8l.com/up/2026-4/20264818449108200.jpg"
+            "https://pic.y8l.com/up/2026-4/20264818450320420.jpg"
+          )
+          i=1
+          for url in "${urls[@]}"; do
+            curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 120 -A "Mozilla/5.0" -o "screens/screen_${i}.jpg" "$url"
+            file "screens/screen_${i}.jpg"
+            i=$((i+1))
+          done
+          sha256sum screens/* > screens/sha256.txt
+
+      - name: Upload reference screens
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-reference-screens
+          path: screens
+          if-no-files-found: error
+          retention-days: 1
