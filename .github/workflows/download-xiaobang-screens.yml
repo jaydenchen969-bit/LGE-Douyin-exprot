@@ -1,0 +1,29 @@
+name: Download Xiaobang Screens
+
+on:
+  push:
+    paths:
+      - '.github/workflows/download-xiaobang-screens.yml'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download screenshots
+        run: |
+          set -euxo pipefail
+          curl -fL -o customer.png 'https://p0.qhimg.com/t11cede5e7bf154ccf69a66f103.png'
+          curl -fL -o data.png 'https://p0.qhimg.com/t11cede5e7b6a2cea807bf96a69.png'
+          curl -fL -o visit.png 'https://p0.qhimg.com/t11cede5e7b09c078a99e56a539.png'
+          curl -fL -o card.png 'https://p0.qhimg.com/t11cede5e7bf551b9e8cfb52249.png'
+          file *.png
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-postlogin-screens
+          path: |
+            customer.png
+            data.png
+            visit.png
+            card.png
+          retention-days: 1
