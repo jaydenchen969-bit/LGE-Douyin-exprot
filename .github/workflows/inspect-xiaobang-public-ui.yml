@@ -1,0 +1,72 @@
+name: Inspect Xiaobang Public UI
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-xiaobang-public-ui.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Fetch only public documents and their directly linked static scripts
+        shell: bash
+        run: |
+          mkdir -p out/documents out/assets
+          python3 - <<'PY'
+          import concurrent.futures, hashlib, json, pathlib, re, urllib.request, urllib.error, urllib.parse
+          from html.parser import HTMLParser
+          ROOT = pathlib.Path('out')
+          URLS = ['https://crm.dylk.com/m/app', 'https://crm.dylk.com/m/all-in-one', 'https://crm.dylk.com/m/tenant']
+          class Links(HTMLParser):
+              def __init__(self):
+                  super().__init__(); self.links=[]
+              def handle_starttag(self, tag, attrs):
+                  a=dict(attrs)
+                  if tag=='script' and a.get('src'): self.links.append(a['src'])
+                  if tag=='link' and a.get('href') and (a.get('rel')=='stylesheet' or a.get('as') in ('script','style')): self.links.append(a['href'])
+          def get(url, dest):
+              result={'requested_url':url, 'local_file':str(dest), 'authenticated':False}
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36'})
+                  with urllib.request.urlopen(req, timeout=18) as r:
+                      data=r.read(6000001)
+                      result.update(status=r.status,final_url=r.url,content_type=r.headers.get('Content-Type',''),bytes=len(data))
+                      if len(data)>6000000:
+                          result['error']='asset exceeds 6 MB limit'; return result,None
+                      dest.write_bytes(data)
+                      result['sha256']=hashlib.sha256(data).hexdigest()
+                      return result,data
+              except urllib.error.HTTPError as e:
+                  result.update(status=e.code,error=str(e),final_url=e.url)
+              except Exception as e: result['error']=str(e)
+              return result,None
+          docs=[]; assets=set()
+          for i,url in enumerate(URLS):
+              result,data=get(url,ROOT/'documents'/f'page-{i}.html'); docs.append(result)
+              print(json.dumps(result,ensure_ascii=False))
+              if data and 'html' in result.get('content_type',''):
+                  p=Links(); p.feed(data.decode('utf8','replace'))
+                  for link in p.links:
+                      u=urllib.parse.urljoin(result.get('final_url',url),link)
+                      parts=urllib.parse.urlsplit(u)
+                      if parts.scheme!='https' or re.search(r'/(api|passport|oauth)/',parts.path): continue
+                      if re.search(r'\.(js|css)(?:$|\?)',u): assets.add(u)
+          assets=sorted(assets)[:24]
+          def asset(item):
+              i,url=item; ext='.css' if '.css' in urllib.parse.urlsplit(url).path else '.js'
+              r,_=get(url,ROOT/'assets'/f'{i:03d}{ext}'); return r
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              results=list(pool.map(asset,enumerate(assets)))
+          manifest={'mode':'anonymous_public_static_resources_only','documents':docs,'assets':results,'not_attempted':['login','business APIs','token acquisition','internal environments','authentication bypass']}
+          (ROOT/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
+          print('Saved',len(results),'directly-linked static assets')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-public-ui-inspection
+          path: out
+          retention-days: 7
+          if-no-files-found: error
