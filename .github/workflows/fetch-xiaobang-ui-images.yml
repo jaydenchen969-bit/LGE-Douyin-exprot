@@ -1,0 +1,34 @@
+name: Fetch Xiaobang UI Images
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-xiaobang-ui-images.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Download only source-referenced PNG files
+        run: |
+          mkdir out
+          python3 - <<'PY'
+          import pathlib,urllib.request,json,hashlib
+          root=pathlib.Path('out');manifest=[]
+          for name in ['empty_light.245522a5.png','xiaobang-bg.3a1b03a9.png']:
+              url='https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/image/'+name
+              with urllib.request.urlopen(url,timeout=20) as r:
+                  data=r.read(2000000)
+                  if not data.startswith(b'\x89PNG\r\n\x1a\n'):raise ValueError('Not PNG')
+                  (root/name).write_bytes(data)
+                  manifest.append({'url':url,'file':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'status':r.status})
+          (root/'images-manifest.json').write_text(json.dumps(manifest,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-original-ui-images
+          path: out
+          retention-days: 7
+          if-no-files-found: error
