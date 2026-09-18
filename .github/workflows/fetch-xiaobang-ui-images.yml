@@ -9,26 +9,44 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
     steps:
-      - name: Download only source-referenced PNG files
+      - name: Archive explicit source-declared static dependencies only
         run: |
-          mkdir out
+          mkdir -p out/assets
           python3 - <<'PY'
-          import pathlib,urllib.request,json,hashlib
-          root=pathlib.Path('out');manifest=[]
-          for name in ['empty_light.245522a5.png','xiaobang-bg.3a1b03a9.png']:
-              url='https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/image/'+name
-              with urllib.request.urlopen(url,timeout=20) as r:
-                  data=r.read(2000000)
-                  if not data.startswith(b'\x89PNG\r\n\x1a\n'):raise ValueError('Not PNG')
-                  (root/name).write_bytes(data)
-                  manifest.append({'url':url,'file':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'status':r.status})
-          (root/'images-manifest.json').write_text(json.dumps(manifest,indent=2))
+          import pathlib,urllib.request,json,hashlib,concurrent.futures
+          root=pathlib.Path('out')
+          groups={
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/message/cn/async/':'222.5d0f98c8.js 222.7b90777b.css 819.ed8df13e.js 819.e2feffdf.css 982.14716903.js 982.8de715ff.css',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/message/cn/chunk/':'377.c55fb99a.js 410.6d526efc.js 459.5ce44e95.js 488.520be543.js 686.e4cd1256.js 822.3c947409.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/message/cn/':'506.40c84825.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/daily_report_h5/life_daily_report/static/js/async/':'150.edd5fa17.js 189.41af41cc.js 251.80fd9321.js 252.6f9fd5ee.js 449.b4867c1f.js 474.ab186a9f.js 593.acf69297.js 612.f7b0a6f1.js 626.9e26dbd5.js 667.ffa8aaf1.js 668.11b81d97.js 718.a856a817.js lib-axios.38012819.js 767.775f95b0.js 789.73650806.js 795.628acd7c.js 821.a002b7f0.js 832.2069ca0d.js lib-replay.8ffa157a.js 92.4ea3b47d.js 925.9e726307.js 951.b1e32e6b.js 973.e5b1f7b9.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/daily_report_h5/life_daily_report/static/css/async/':'150.1ceaf400.css 251.345c836c.css 252.d500f198.css 626.8fc8d617.css 789.14b05663.css 795.ae650c7e.css 821.b518c575.css 925.9a7aded1.css',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/home/cn/chunk/':'108.c79aef29.js 822.b1eeded4.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/image/':'qualification-example.0ef57855.jpg'
+          }
+          urls=[base+name for base,names in groups.items() for name in names.split()]
+          def one(url):
+              name=hashlib.sha256(url.encode()).hexdigest()[:20]+pathlib.Path(url).suffix
+              item={'requested_url':url,'file':'assets/'+name,'authenticated':False}
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'}),timeout=22) as r:
+                      data=r.read(12000001)
+                      if len(data)>12000000:raise ValueError('Too large')
+                      if url.endswith('.jpg') and not data.startswith(b'\xff\xd8'):raise ValueError('Not JPEG')
+                      (root/item['file']).write_bytes(data)
+                      item.update(status=r.status,bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),content_type=r.headers.get('Content-Type',''))
+              except Exception as error:item['error']=str(error)
+              return item
+          with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:items=list(pool.map(one,urls))
+          (root/'manifest.json').write_text(json.dumps(items,indent=2))
+          print('ARCHIVED',sum(e.get('status')==200 for e in items),'OF',len(items))
+          print(json.dumps([e for e in items if e.get('status')!=200],indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: xiaobang-original-ui-images
+          name: xiaobang-continuation-static-assets
           path: out
           retention-days: 7
           if-no-files-found: error
