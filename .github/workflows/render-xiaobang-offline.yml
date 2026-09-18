@@ -1,0 +1,130 @@
+name: Render Xiaobang Offline
+on:
+  push:
+    paths:
+      - '.github/workflows/render-xiaobang-offline.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xiaobang-micro-ui-assets
+          run-id: 35360673148
+          github-token: ${{ github.token }}
+          path: out
+      - name: Retrieve explicit public lazy UI chunks
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures,hashlib,json,pathlib,urllib.request
+          root=pathlib.Path('out');(root/'lazy').mkdir(exist_ok=True)
+          groups={
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/common/':'6579.ffbfe75d.js 3328.051c6c79.js 1192.6b91fb8e.js 478.8dcdbedb.js 985.1.0.0.4529.js 8647.e6b83849.js 9081.bd64075a.js 726.8289db02.js 6918.33daa4d0.js 3273.c5c9e043.js 4131.6f5e3ef0.js 3140.0398f676.js 7426.1.0.0.4529.js 1876.95cfb5f0.js 6100.72a86183.js 4920.8a5aebea.js 6065.2a9318a3.js 4038.48dc3a61.js 6304.d794232d.js 4864.1.0.0.4529.js 6259.c66355e9.js 1469.40aaa037.js 2260.1.0.0.4529.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/async/':'478.7b8109fb.css 985.96a1a391.css 8647.e401b0c3.css 726.a0e53421.css 6918.44464e06.css 7426.a1aff1b6.css 6100.49e05662.css 4920.5a4cff5b.css 4864.000fc084.css 6259.c58db9f7.css 2260.f8d0f882.css',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/chunk/':'7449.72ef8b25.js 8292.9d1d6c85.js 317.84bf3798.js 6119.2e420957.js 8333.452f8c67.js 867.3f5b2b3d.js 6044.12181028.js 1730.4e1da0b1.js 7948.40f5197d.js 1185.5b8d1ea3.js 8658.bdcb383b.js 437.77812d80.js 4473.7800e34a.js 6011.4ff3fb57.js 1800.5465e180.js 547.4669132d.js 2658.dd0d448a.js 5434.2513cb16.js 2949.86031919.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/cn/':'8843.0fd03db9.js 1894.52a03d89.js 6738.312043d7.js 2012.f45161ee.js 5943.2a49c297.js 6196.00dd79fe.js 4270.a9a79602.js 4685.27db02ee.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/home/cn/chunk/':'97.172f5223.js 141.00bda5ee.js 451.12db2109.js 858.69648049.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/home/cn/async/':'97.6234bca1.css 278.88a5e812.css 380.69995e86.js 380.c762083e.css 858.1c2d4c59.css 995.219ca3d0.js 995.5cb16afb.css',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/home/cn/':'278.fb5828e0.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/statistic/static/js/':'common.bac6ecbb92492907.js',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/statistic/static/css/async/':'common.ddaa0aa6.css',
+            'https://lf-cdn-tos.bytescm.com/obj/static/h5/xiaobang/application/statistic/static/js/async/':'6848.059b8c05.js'
+          }
+          urls=[base+f for base,names in groups.items() for f in names.split()]
+          def one(item):
+              i,url=item;dest=root/'lazy'/f'{i:03d}{pathlib.Path(url).suffix}';res={'requested_url':url,'local_file':str(dest),'authenticated':False}
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'}),timeout=20) as response:
+                      data=response.read(12000001)
+                      if len(data)>12000000:raise ValueError('Too large')
+                      dest.write_bytes(data);res.update(status=response.status,content_type=response.headers.get('Content-Type',''),bytes=len(data),sha256=hashlib.sha256(data).hexdigest())
+              except Exception as error:res['error']=str(error)
+              return res
+          with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:results=list(pool.map(one,enumerate(urls)))
+          (root/'lazy-manifest.json').write_text(json.dumps(results,ensure_ascii=False,indent=2));print('LAZY',len(results),'OK',sum(r.get('status')==200 for r in results))
+          PY
+      - name: Browser tooling
+        run: python3 -m pip install --quiet playwright
+      - name: Render only localhost snapshots with business API requests blocked
+        shell: bash
+        run: |
+          cat > offline_probe.py <<'PY'
+          import asyncio,json,re,threading,shutil
+          from pathlib import Path
+          from urllib.parse import urlsplit,unquote
+          from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+          from playwright.async_api import async_playwright
+          root=Path('out');(root/'screens').mkdir(exist_ok=True)
+          m=json.loads((root/'manifest.json').read_text());assets={};docs={};misses=[]
+          for e in m['assets']+m['documents']+json.loads((root/'lazy-manifest.json').read_text()):
+              p=Path(e['local_file'])
+              if p.exists() and e.get('status')==200:
+                  assets[unquote(e['requested_url'])]=(p,e.get('content_type',''))
+                  if e.get('app_name'):docs[e['app_name']]=p
+          host='http://127.0.0.1:8765';bases={'crm':'/m/crm','data':'/m/data','home-page':'/m/home-page'}
+          def rewrite(data):
+              text=data.decode('utf8','replace')
+              for domain in ['lf-cdn-tos.bytescm.com','lf6-cdn2-tos.bytegoofy.com','lf3-cdn-tos.bytescm.com']:
+                  text=text.replace('https://'+domain+'/',host+'/__cdn/'+domain+'/').replace('//'+domain+'/',host+'/__cdn/'+domain+'/')
+              return text.encode()
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self,*args):pass
+              def do_GET(self):
+                  path=urlsplit(self.path).path;p=None;ctype='text/html'
+                  if path.startswith('/__cdn/'):
+                      u='https://'+unquote(path.removeprefix('/__cdn/'));item=assets.get(u)
+                      if item:p,ctype=item
+                      else:misses.append(u)
+                  else:
+                      for name,base in bases.items():
+                          if path==base or path.startswith(base+'/'):p=docs[name];break
+                  if p:
+                      data=p.read_bytes()
+                      if p.suffix in ['.html','.js','.css']:data=rewrite(data)
+                      self.send_response(200);self.send_header('Content-Type',ctype);self.send_header('Access-Control-Allow-Origin','*');self.end_headers();self.wfile.write(data)
+                  else:self.send_response(404);self.end_headers()
+          server=ThreadingHTTPServer(('127.0.0.1',8765),Handler);threading.Thread(target=server.serve_forever,daemon=True).start()
+          async def run():
+              results=[]
+              async with async_playwright() as pw:
+                  executable=shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+                  if not executable:raise RuntimeError('No preinstalled browser')
+                  browser=await pw.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox'])
+                  targets=[('my-customers','/m/crm/united-seas/my-customer'),('developing','/m/crm/united-seas/developing'),('find-customers','/m/crm/united-seas/find-customer'),('data','/m/data/home'),('home','/m/home-page')]
+                  for name,path in targets:
+                      requests=[];errors=[]
+                      context=await browser.new_context(viewport={'width':390,'height':844},device_scale_factor=2,locale='zh-CN',service_workers='block',user_agent='Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36')
+                      async def guard(route):
+                          r=route.request
+                          if r.resource_type in ['fetch','xhr']:
+                              requests.append({'url':r.url,'method':r.method,'body':r.post_data,'action':'offline_503'})
+                              await route.fulfill(status=503,content_type='application/json',body='{"code":503,"message":"OFFLINE_NO_BUSINESS_API","data":null}',headers={'Access-Control-Allow-Origin':'*'})
+                          elif r.url.startswith(host):await route.continue_()
+                          else:requests.append({'url':r.url,'type':r.resource_type,'action':'blocked'});await route.abort()
+                      await context.route('**/*',guard)
+                      page=await context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
+                      try:
+                          await page.goto(host+path,wait_until='domcontentloaded',timeout=12000);await page.wait_for_timeout(4500)
+                          text=await page.locator('body').inner_text();await page.screenshot(path=str(root/'screens'/f'{name}.png'))
+                      except Exception as error:text='';errors.append(str(error))
+                      results.append({'name':name,'path':path,'text':text,'errors':errors,'requests':requests,'production_requests_sent':0})
+                      print(name,repr(text[:400]),errors[:2]);await context.close()
+                  await browser.close()
+              (root/'render-report.json').write_text(json.dumps(results,ensure_ascii=False,indent=2));(root/'missing-static.json').write_text(json.dumps(sorted(set(misses)),ensure_ascii=False,indent=2))
+          asyncio.run(run());server.shutdown()
+          PY
+          python3 offline_probe.py
+          cp offline_probe.py out/offline_probe.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xiaobang-offline-source-and-probe
+          path: out
+          retention-days: 7
+          if-no-files-found: error
