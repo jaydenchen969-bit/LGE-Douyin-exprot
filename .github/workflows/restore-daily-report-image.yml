@@ -1,0 +1,30 @@
+name: Restore Daily Report Image
+on:
+  push:
+    paths: ['.github/workflows/restore-daily-report-image.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Download exact public image referenced by archived daily-report source
+        run: |
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request,pathlib,hashlib,json
+          url='https://lf-cdn-tos.bytescm.com/obj/static/life_service/crm_app/daily_report_h5/life_daily_report/static/image/no_comment.4b42dac8.png'
+          with urllib.request.urlopen(url,timeout=30) as r:
+              b=r.read(2000000)
+              assert b.startswith(b'\x89PNG\r\n\x1a\n')
+              pathlib.Path('out/no_comment.4b42dac8.png').write_bytes(b)
+              pathlib.Path('out/manifest.json').write_text(json.dumps({'url':url,'bytes':len(b),'status':r.status,'sha256':hashlib.sha256(b).hexdigest(),'authenticated':False},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaobang-daily-comment-image
+          path: out
+          retention-days: 7
+          if-no-files-found: error
