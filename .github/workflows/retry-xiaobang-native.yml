@@ -8,15 +8,19 @@ permissions:
 jobs:
   native:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Restore explicit Android CLI path
+      - name: Restore explicit Android CLI and AVD paths
         run: |
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "ANDROID_USER_HOME=$RUNNER_TEMP/xb-android" >> "$GITHUB_ENV"
+          echo "ANDROID_EMULATOR_HOME=$RUNNER_TEMP/xb-android" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$RUNNER_TEMP/xb-android/avd" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/xb-android/avd"
           python3 -m pip install --quiet pyyaml==6.0.2
       - name: Run pinned APK and bounded isolated emulator setup
         run: |
@@ -26,13 +30,14 @@ jobs:
           script=workflow['jobs']['native']['steps'][0]['run']
           script=script.replace('set -euo pipefail','set -euxo pipefail')
           script=script.replace('adb wait-for-device','timeout 90 adb wait-for-device')
+          script=script.replace("--force\n",'--force --path "$ANDROID_AVD_HOME/xb-ui.avd"\nprintf "avd.ini.encoding=UTF-8\\npath=%s\\ntarget=android-30\\n" "$ANDROID_AVD_HOME/xb-ui.avd" > "$ANDROID_AVD_HOME/xb-ui.ini"\ntest -f "$ANDROID_AVD_HOME/xb-ui.avd/config.ini"\n"$ANDROID_HOME/emulator/emulator" -list-avds\n')
           script=script.replace('echo $! >out/emulator.pid','echo $! >out/emulator.pid\nsleep 5\ncat out/emulator.log\nkill -0 "$(cat out/emulator.pid)"')
           try:
-              subprocess.run(['bash','-euo','pipefail','-c',script],check=True,timeout=420)
+              subprocess.run(['bash','-euo','pipefail','-c',script],check=True,timeout=480)
           finally:
               for p in pathlib.Path('out').glob('*.log'):
                   print('=== '+str(p)+' ===',flush=True)
-                  print(p.read_text(errors='replace')[-20000:],flush=True)
+                  print(p.read_text(errors='replace')[-16000:],flush=True)
           PY
       - name: Run existing prelogin-only capture script
         run: |
