@@ -1,0 +1,78 @@
+name: Figma Original Assets
+on:
+  push:
+    paths: ['.github/workflows/figma-original-assets.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - name: Temporary encrypted asset handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 -m pip install --quiet cryptography requests
+          python3 -u - <<'PY'
+          import os,time,json,base64,hashlib,requests,urllib.parse
+          from cryptography.hazmat.primitives.asymmetric import rsa,padding
+          from cryptography.hazmat.primitives import serialization,hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          repo=os.environ['REPOSITORY'];run=os.environ['RUN_ID']
+          api='https://api.github.com/repos/'+repo+'/contents/'
+          session=requests.Session();session.headers.update({'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          private=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+          public=private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+          keypath='.figma-transfer/key-'+run+'.json'
+          keydata=json.dumps({'run':run,'public_key':public,'expires_in_seconds':900})
+          result=session.put(api+keypath,json={'message':'chore: publish ephemeral Figma asset encryption public key','content':base64.b64encode(keydata.encode()).decode()},timeout=20)
+          result.raise_for_status();keysha=result.json()['content']['sha']
+          print('READY',run,flush=True)
+          queue='.figma-transfer/queue-'+run+'.json'
+          packet=None
+          try:
+              for attempt in range(180):
+                  response=session.get(api+queue,timeout=15)
+                  if response.status_code==200:
+                      packet=json.loads(base64.b64decode(response.json()['content']));break
+                  if response.status_code!=404:raise RuntimeError('queue HTTP '+str(response.status_code))
+                  time.sleep(5)
+              if packet is None:raise RuntimeError('Encrypted handoff not supplied before deadline')
+              key=private.decrypt(base64.b64decode(packet['key']),padding.OAEP(mgf=padding.MGF1(hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+              clear=AESGCM(key).decrypt(base64.b64decode(packet['nonce']),base64.b64decode(packet['ciphertext']),run.encode())
+              tasks=json.loads(clear)
+              if len(tasks)>8:raise RuntimeError('Too many assets')
+              results=[]
+              for i,item in enumerate(tasks):
+                  target=urllib.parse.urlsplit(item['upload'])
+                  if target.scheme!='https' or target.hostname!='mcp.figma.com' or not target.path.startswith('/mcp/upload/') or not target.path.endswith('/submit'):raise RuntimeError('Destination is not an issued Figma asset upload')
+                  source=urllib.parse.urlsplit(item['source'])
+                  if source.scheme!='https' or source.hostname not in ('lf-cdn-tos.bytescm.com','lf3-cdn-tos.bytescm.com','lf6-cdn2-tos.bytegoofy.com') or not source.path.startswith('/obj/'):raise RuntimeError('Source outside archived public static CDN')
+                  raw=requests.get(item['source'],timeout=25);raw.raise_for_status();data=raw.content
+                  if len(data)>2000000 or hashlib.sha256(data).hexdigest()!=item['sha256']:raise RuntimeError('Original asset hash mismatch')
+                  upload=requests.post(item['upload'],files={'file':(item['name'],data,item['mime'])},timeout=60)
+                  if not upload.ok:raise RuntimeError('Figma upload HTTP '+str(upload.status_code))
+                  reply=upload.json();results.append({'name':item['name'],'source_sha256':item['sha256'],'bytes':len(data),'result':reply})
+                  print('UPLOADED',item['name'],len(data),flush=True)
+              os.makedirs('out',exist_ok=True)
+              open('out/result.json','w').write(json.dumps(results,ensure_ascii=False,indent=2))
+              resultpath='.figma-transfer/result-'+run+'.json'
+              saved=session.put(api+resultpath,json={'message':'chore: save verified Figma original-image upload receipts','content':base64.b64encode(json.dumps(results).encode()).decode()},timeout=20);saved.raise_for_status()
+          finally:
+              for path in (keypath,queue):
+                  try:
+                      item=session.get(api+path,timeout=15)
+                      if item.ok:session.delete(api+path,json={'message':'chore: clean temporary Figma handoff record','sha':item.json()['sha']},timeout=20)
+                  except Exception:pass
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: figma-original-asset-receipts
+          path: out
+          if-no-files-found: ignore
+          retention-days: 7
