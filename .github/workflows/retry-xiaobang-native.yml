@@ -1,0 +1,40 @@
+name: Retry Xiaobang Native UI
+on:
+  push:
+    paths: ['.github/workflows/retry-xiaobang-native.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore explicit Android CLI path
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          python3 -m pip install --quiet pyyaml==6.0.2
+      - name: Run existing pinned APK and network-isolated emulator setup
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,yaml
+          workflow=yaml.safe_load(pathlib.Path('.github/workflows/verify-xiaobang-primary.yml').read_text())
+          subprocess.run(['bash','-euo','pipefail','-c',workflow['jobs']['native']['steps'][0]['run']],check=True)
+          PY
+      - name: Run existing prelogin-only capture script
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,yaml
+          workflow=yaml.safe_load(pathlib.Path('.github/workflows/verify-xiaobang-primary.yml').read_text())
+          subprocess.run(['bash','-euo','pipefail','-c',workflow['jobs']['native']['steps'][1]['run']],check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xiaobang-native-prelogin-verification
+          path: out
+          retention-days: 7
