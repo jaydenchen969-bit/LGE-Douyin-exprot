@@ -8,7 +8,7 @@ permissions:
 jobs:
   native:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,19 +18,28 @@ jobs:
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           python3 -m pip install --quiet pyyaml==6.0.2
-      - name: Run existing pinned APK and network-isolated emulator setup
+      - name: Run pinned APK and bounded isolated emulator setup
         run: |
           python3 - <<'PY'
           import pathlib,subprocess,yaml
           workflow=yaml.safe_load(pathlib.Path('.github/workflows/verify-xiaobang-primary.yml').read_text())
-          subprocess.run(['bash','-euo','pipefail','-c',workflow['jobs']['native']['steps'][0]['run']],check=True)
+          script=workflow['jobs']['native']['steps'][0]['run']
+          script=script.replace('set -euo pipefail','set -euxo pipefail')
+          script=script.replace('adb wait-for-device','timeout 90 adb wait-for-device')
+          script=script.replace('echo $! >out/emulator.pid','echo $! >out/emulator.pid\nsleep 5\ncat out/emulator.log\nkill -0 "$(cat out/emulator.pid)"')
+          try:
+              subprocess.run(['bash','-euo','pipefail','-c',script],check=True,timeout=420)
+          finally:
+              for p in pathlib.Path('out').glob('*.log'):
+                  print('=== '+str(p)+' ===',flush=True)
+                  print(p.read_text(errors='replace')[-20000:],flush=True)
           PY
       - name: Run existing prelogin-only capture script
         run: |
           python3 - <<'PY'
           import pathlib,subprocess,yaml
           workflow=yaml.safe_load(pathlib.Path('.github/workflows/verify-xiaobang-primary.yml').read_text())
-          subprocess.run(['bash','-euo','pipefail','-c',workflow['jobs']['native']['steps'][1]['run']],check=True)
+          subprocess.run(['bash','-euo','pipefail','-c',workflow['jobs']['native']['steps'][1]['run']],check=True,timeout=240)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
